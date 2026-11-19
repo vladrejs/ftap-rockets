@@ -1,16 +1,18 @@
 -- ============================================================================
--- FTAP ROCKET SYSTEM (PC + MOBILE ROUND BUTTONS + 100% WORKING TOUCH DRAG)
+-- FTAP ROCKET SYSTEM (INFINITE RESERVE + 2 SIDE SLOTS + 1000+ STUDS SKY STORAGE)
 -- Клавиши на ПК: [V] Захват | [B] Обычный выстрел | [N] Самонаводка
--- На телефоне: Круглые кнопки, рабочее перетаскивание пальцем, размер, прозрачность
+-- На телефоне: Круглые кнопки, редактор (перетаскивание, размер, прозрачность),
+--              2 ракеты по бокам + остальные на 1000+ студов над игроком
 -- ============================================================================
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local Workspace = game:GetService("Workspace")
 local CoreGui = game:GetService("CoreGui")
 
 local player = Players.LocalPlayer
-local camera = workspace.CurrentCamera
+local camera = Workspace.CurrentCamera
 
 -- ============================================================================
 -- 1. АВТО-ОЧИСТКА СТАРОГО СКРИПТА ПРИ ПЕРЕЗАПУСКЕ
@@ -20,9 +22,12 @@ if env.FtapRocketCleanup then
     pcall(env.FtapRocketCleanup)
 end
 
+-- rockets[1..2] — активные ракеты по бокам у камеры
+-- rockets[3..N] — резервные ракеты на высоте 1000+ студов над игроком
 local rockets = {}
 local homingMissiles = {}
-local maxSlots = 2
+local activeSideSlots = 2
+local skyHeightOffset = 1000 -- минимум 1000 студов над игроком
 local isDestroyed = false
 
 -- Состояние интерфейса и редактора
@@ -34,7 +39,7 @@ local maxScale = 1.9
 local buttonTransparency = 0.15
 
 -- ============================================================================
--- 2. ЛОГИКА РАКЕТ (ЗАХВАТ, ВЫСТРЕЛ, САМОНАВЕДЕНИЕ)
+-- 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ И ПОИСК РАКЕТ / ЦЕЛЕЙ
 -- ============================================================================
 local function getLocalRootPart()
     local char = player.Character
@@ -42,6 +47,54 @@ local function getLocalRootPart()
         return char:FindFirstChild("HumanoidRootPart")
     end
     return nil
+end
+
+local function isRocketTracked(candidate)
+    for _, r in ipairs(rockets) do
+        if r == candidate or candidate:IsDescendantOf(r) or r:IsDescendantOf(candidate) then
+            return true
+        end
+    end
+    for _, h in ipairs(homingMissiles) do
+        if h.rocket == candidate then
+            return true
+        end
+    end
+    return false
+end
+
+local function setRocketCollision(rocket, enabled)
+    if not rocket or not rocket.Parent then return end
+    for _, part in ipairs(rocket:GetDescendants()) do
+        if part:IsA("BasePart") then
+            part.CanCollide = enabled
+        end
+    end
+end
+
+local function positionRocket(rocket, targetCFrame, zeroVelocity)
+    if not rocket or not rocket.Parent then return end
+    if rocket:IsA("Model") then
+        rocket:PivotTo(targetCFrame)
+        if zeroVelocity then
+            if rocket.PrimaryPart then
+                rocket.PrimaryPart.AssemblyLinearVelocity = Vector3.zero
+                rocket.PrimaryPart.AssemblyAngularVelocity = Vector3.zero
+            end
+            for _, part in ipairs(rocket:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    part.AssemblyLinearVelocity = Vector3.zero
+                    part.AssemblyAngularVelocity = Vector3.zero
+                end
+            end
+        end
+    elseif rocket:IsA("BasePart") then
+        rocket.CFrame = targetCFrame
+        if zeroVelocity then
+            rocket.AssemblyLinearVelocity = Vector3.zero
+            rocket.AssemblyAngularVelocity = Vector3.zero
+        end
+    end
 end
 
 local function getAimedBombMissile()
@@ -52,12 +105,12 @@ local function getAimedBombMissile()
         raycastParams.FilterDescendantsInstances = {player.Character}
     end
 
-    local raycastResult = workspace:Raycast(mouseRay.Origin, mouseRay.Direction * 60, raycastParams)
+    local raycastResult = Workspace:Raycast(mouseRay.Origin, mouseRay.Direction * 70, raycastParams)
     if raycastResult and raycastResult.Instance then
         local hitInstance = raycastResult.Instance
         local current = hitInstance
-        while current and current ~= workspace do
-            if current.Name == "BombMissile" and current:IsA("Model") then
+        while current and current ~= Workspace do
+            if current.Name == "BombMissile" and (current:IsA("Model") or current:IsA("BasePart")) then
                 return current
             end
             current = current.Parent
@@ -77,10 +130,10 @@ local function getBestTargetPlayer()
         raycastParams.FilterDescendantsInstances = {player.Character}
     end
 
-    local raycastResult = workspace:Raycast(mouseRay.Origin, mouseRay.Direction * 500, raycastParams)
+    local raycastResult = Workspace:Raycast(mouseRay.Origin, mouseRay.Direction * 500, raycastParams)
     if raycastResult and raycastResult.Instance then
         local current = raycastResult.Instance
-        while current and current ~= workspace do
+        while current and current ~= Workspace do
             local foundPlayer = Players:GetPlayerFromCharacter(current)
             if foundPlayer and foundPlayer ~= player then
                 return current
@@ -110,27 +163,18 @@ local function getBestTargetPlayer()
     return closestTarget
 end
 
+-- ============================================================================
+-- 3. ДЕЙСТВИЯ: ЗАХВАТ [V], ОБЫЧНЫЙ ВЫСТРЕЛ [B], САМОНАВОДКА [N]
+-- ============================================================================
 local function ActionGrabRocket()
     if isDestroyed then return end
     local target = getAimedBombMissile()
     local rootPart = getLocalRootPart()
 
     if target and rootPart then
-        local alreadyTaken = false
-        for _, r in ipairs(rockets) do
-            if r == target or target:IsDescendantOf(r) then
-                alreadyTaken = true
-                break
-            end
-        end
-
-        if not alreadyTaken then
-            if #rockets < maxSlots then
-                table.insert(rockets, target)
-                print("BombMissile захвачена! В арсенале:", #rockets)
-            else
-                print("Слоты заполнены (максимум 2)!")
-            end
+        if not isRocketTracked(target) then
+            table.insert(rockets, target)
+            print("BombMissile добавлена! Всего в запасе:", #rockets)
         else
             print("Эта ракета уже у тебя!")
         end
@@ -144,44 +188,35 @@ local function ActionNormalFire()
     if #rockets > 0 then
         local firedRocket = table.remove(rockets, 1)
         if firedRocket and firedRocket.Parent then
-            for _, part in ipairs(firedRocket:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    part.CanCollide = false
-                end
-            end
+            setRocketCollision(firedRocket, false)
 
             local spawnPos = camera.CFrame + (camera.CFrame.LookVector * 10)
             local shootCFrame = spawnPos * CFrame.Angles(-math.rad(90), 0, 0)
+            local velocity = camera.CFrame.LookVector * 400
 
+            positionRocket(firedRocket, shootCFrame, false)
             if firedRocket:IsA("Model") then
-                firedRocket:PivotTo(shootCFrame)
                 if firedRocket.PrimaryPart then
-                    firedRocket.PrimaryPart.AssemblyLinearVelocity = camera.CFrame.LookVector * 400
+                    firedRocket.PrimaryPart.AssemblyLinearVelocity = velocity
                 else
                     for _, part in ipairs(firedRocket:GetDescendants()) do
                         if part:IsA("BasePart") then
-                            part.AssemblyLinearVelocity = camera.CFrame.LookVector * 400
+                            part.AssemblyLinearVelocity = velocity
                         end
                     end
                 end
-            else
-                firedRocket.CFrame = shootCFrame
-                firedRocket.AssemblyLinearVelocity = camera.CFrame.LookVector * 400
+            elseif firedRocket:IsA("BasePart") then
+                firedRocket.AssemblyLinearVelocity = velocity
             end
 
             task.delay(0.5, function()
-                if firedRocket and firedRocket.Parent then
-                    for _, part in ipairs(firedRocket:GetDescendants()) do
-                        if part:IsA("BasePart") then
-                            part.CanCollide = true
-                        end
-                    end
-                end
+                setRocketCollision(firedRocket, true)
             end)
-            print("Обычный выстрел!")
+
+            print("Обычный выстрел! В запасе осталось:", #rockets)
         end
     else
-        print("Нет ракет в арсенале!")
+        print("Нет ракет в запасе!")
     end
 end
 
@@ -192,11 +227,7 @@ local function ActionHomingFire()
         local targetChar = getBestTargetPlayer()
 
         if firedRocket and firedRocket.Parent then
-            for _, part in ipairs(firedRocket:GetDescendants()) do
-                if part:IsA("BasePart") then
-                    part.CanCollide = false
-                end
-            end
+            setRocketCollision(firedRocket, false)
 
             local spawnPos = camera.CFrame.Position + (camera.CFrame.LookVector * 10)
             local targetRoot = targetChar and targetChar:FindFirstChild("HumanoidRootPart")
@@ -205,11 +236,7 @@ local function ActionHomingFire()
                 initialCF = CFrame.new(spawnPos, targetRoot.Position) * CFrame.Angles(-math.rad(90), 0, 0)
             end
 
-            if firedRocket:IsA("Model") then
-                firedRocket:PivotTo(initialCF)
-            else
-                firedRocket.CFrame = initialCF
-            end
+            positionRocket(firedRocket, initialCF, false)
 
             table.insert(homingMissiles, {
                 rocket = firedRocket,
@@ -219,13 +246,7 @@ local function ActionHomingFire()
             })
 
             task.delay(0.6, function()
-                if firedRocket and firedRocket.Parent then
-                    for _, part in ipairs(firedRocket:GetDescendants()) do
-                        if part:IsA("BasePart") then
-                            part.CanCollide = true
-                        end
-                    end
-                end
+                setRocketCollision(firedRocket, true)
             end)
 
             if targetChar and targetChar:FindFirstChild("Humanoid") then
@@ -235,12 +256,12 @@ local function ActionHomingFire()
             end
         end
     else
-        print("Нет ракет в арсенале!")
+        print("Нет ракет в запасе!")
     end
 end
 
 -- ============================================================================
--- 3. ЖЕЛЕЗОБЕТОННОЕ ПЕРЕТАСКИВАНИЕ ЧЕРЕЗ GETMOUSELOCATION()
+-- 4. ЖЕЛЕЗОБЕТОННОЕ ПЕРЕТАСКИВАНИЕ ЧЕРЕЗ GETMOUSELOCATION()
 -- ============================================================================
 local activeConnections = {}
 local function TrackConn(conn)
@@ -307,7 +328,7 @@ local function AttachDrag(dragSource, targetFrame, canDragChecker, onClickCallba
 end
 
 -- ============================================================================
--- 4. ИНТЕРФЕЙС: МЕНЮ + КРУГЛЫЕ КНОПКИ + РЕДАКТОР
+-- 5. ИНТЕРФЕЙС: МЕНЮ + КРУГЛЫЕ КНОПКИ + РЕДАКТОР
 -- ============================================================================
 local function RemoveOldGui(parentObj)
     if not parentObj then return end
@@ -336,10 +357,9 @@ if not attached and player then
     screenGui.Parent = player:WaitForChild("PlayerGui")
 end
 
--- Главное меню
 local mainMenu = Instance.new("Frame")
 mainMenu.Name = "MainMenu"
-mainMenu.Size = UDim2.new(0, 248, 0, 250)
+mainMenu.Size = UDim2.new(0, 248, 0, 224)
 mainMenu.Position = UDim2.new(0, 14, 0.18, 0)
 mainMenu.BackgroundColor3 = Color3.fromRGB(20, 22, 28)
 mainMenu.BackgroundTransparency = 0.12
@@ -358,7 +378,7 @@ local menuTitle = Instance.new("TextButton")
 menuTitle.Size = UDim2.new(1, -68, 0, 26)
 menuTitle.Position = UDim2.new(0, 10, 0, 5)
 menuTitle.BackgroundTransparency = 1
-menuTitle.Text = "🚀 Ракеты • Слоты: 0/2"
+menuTitle.Text = "🚀 Ракет: 0 (1000+↑: 0)"
 menuTitle.TextColor3 = Color3.fromRGB(245, 248, 255)
 menuTitle.TextSize = 13
 menuTitle.Font = Enum.Font.GothamBold
@@ -412,7 +432,7 @@ editModeBtn.Parent = mainMenu
 Instance.new("UICorner", editModeBtn).CornerRadius = UDim.new(0, 9)
 
 local sizeLabel = Instance.new("TextLabel")
-sizeLabel.Size = UDim2.new(0.56, 0, 0, 34)
+sizeLabel.Size = UDim2.new(0.56, 0, 0, 32)
 sizeLabel.Position = UDim2.new(0, 10, 0, 122)
 sizeLabel.BackgroundColor3 = Color3.fromRGB(32, 36, 46)
 sizeLabel.Text = "Размер: 100%"
@@ -423,7 +443,7 @@ sizeLabel.Parent = mainMenu
 Instance.new("UICorner", sizeLabel).CornerRadius = UDim.new(0, 9)
 
 local sizeMinusBtn = Instance.new("TextButton")
-sizeMinusBtn.Size = UDim2.new(0, 44, 0, 34)
+sizeMinusBtn.Size = UDim2.new(0, 45, 0, 32)
 sizeMinusBtn.Position = UDim2.new(0.58, 4, 0, 122)
 sizeMinusBtn.BackgroundColor3 = Color3.fromRGB(165, 58, 66)
 sizeMinusBtn.Text = "−"
@@ -434,8 +454,8 @@ sizeMinusBtn.Parent = mainMenu
 Instance.new("UICorner", sizeMinusBtn).CornerRadius = UDim.new(0, 9)
 
 local sizePlusBtn = Instance.new("TextButton")
-sizePlusBtn.Size = UDim2.new(0, 44, 0, 34)
-sizePlusBtn.Position = UDim2.new(0.58, 52, 0, 122)
+sizePlusBtn.Size = UDim2.new(0, 45, 0, 32)
+sizePlusBtn.Position = UDim2.new(0.58, 53, 0, 122)
 sizePlusBtn.BackgroundColor3 = Color3.fromRGB(48, 155, 88)
 sizePlusBtn.Text = "+"
 sizePlusBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -445,8 +465,8 @@ sizePlusBtn.Parent = mainMenu
 Instance.new("UICorner", sizePlusBtn).CornerRadius = UDim.new(0, 9)
 
 local alphaLabel = Instance.new("TextLabel")
-alphaLabel.Size = UDim2.new(0.56, 0, 0, 34)
-alphaLabel.Position = UDim2.new(0, 10, 0, 162)
+alphaLabel.Size = UDim2.new(0.56, 0, 0, 32)
+alphaLabel.Position = UDim2.new(0, 10, 0, 160)
 alphaLabel.BackgroundColor3 = Color3.fromRGB(32, 36, 46)
 alphaLabel.Text = "Прозрачность: 15%"
 alphaLabel.TextColor3 = Color3.fromRGB(235, 240, 250)
@@ -456,8 +476,8 @@ alphaLabel.Parent = mainMenu
 Instance.new("UICorner", alphaLabel).CornerRadius = UDim.new(0, 9)
 
 local alphaMinusBtn = Instance.new("TextButton")
-alphaMinusBtn.Size = UDim2.new(0, 44, 0, 34)
-alphaMinusBtn.Position = UDim2.new(0.58, 4, 0, 162)
+alphaMinusBtn.Size = UDim2.new(0, 45, 0, 32)
+alphaMinusBtn.Position = UDim2.new(0.58, 4, 0, 160)
 alphaMinusBtn.BackgroundColor3 = Color3.fromRGB(55, 62, 78)
 alphaMinusBtn.Text = "−"
 alphaMinusBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -467,8 +487,8 @@ alphaMinusBtn.Parent = mainMenu
 Instance.new("UICorner", alphaMinusBtn).CornerRadius = UDim.new(0, 9)
 
 local alphaPlusBtn = Instance.new("TextButton")
-alphaPlusBtn.Size = UDim2.new(0, 44, 0, 34)
-alphaPlusBtn.Position = UDim2.new(0.58, 52, 0, 162)
+alphaPlusBtn.Size = UDim2.new(0, 45, 0, 32)
+alphaPlusBtn.Position = UDim2.new(0.58, 53, 0, 160)
 alphaPlusBtn.BackgroundColor3 = Color3.fromRGB(55, 62, 78)
 alphaPlusBtn.Text = "+"
 alphaPlusBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
@@ -478,15 +498,15 @@ alphaPlusBtn.Parent = mainMenu
 Instance.new("UICorner", alphaPlusBtn).CornerRadius = UDim.new(0, 9)
 
 local resetLayoutBtn = Instance.new("TextButton")
-resetLayoutBtn.Size = UDim2.new(1, -20, 0, 34)
-resetLayoutBtn.Position = UDim2.new(0, 10, 0, 204)
+resetLayoutBtn.Size = UDim2.new(1, -20, 0, 22)
+resetLayoutBtn.Position = UDim2.new(0, 10, 0, 196)
 resetLayoutBtn.BackgroundColor3 = Color3.fromRGB(68, 74, 92)
 resetLayoutBtn.Text = "Сбросить вид кнопок"
 resetLayoutBtn.TextColor3 = Color3.fromRGB(240, 244, 252)
-resetLayoutBtn.TextSize = 12
+resetLayoutBtn.TextSize = 11
 resetLayoutBtn.Font = Enum.Font.GothamBold
 resetLayoutBtn.Parent = mainMenu
-Instance.new("UICorner", resetLayoutBtn).CornerRadius = UDim.new(0, 9)
+Instance.new("UICorner", resetLayoutBtn).CornerRadius = UDim.new(0, 8)
 
 local reopenMenuBtn = Instance.new("TextButton")
 reopenMenuBtn.Size = UDim2.new(0, 122, 0, 36)
@@ -514,7 +534,7 @@ AttachDrag(reopenMenuBtn, reopenMenuBtn, function() return true end, function()
 end)
 
 -- ============================================================================
--- 5. КРУГЛЫЕ КРАСИВЫЕ КНОПКИ ДЛЯ ТЕЛЕФОНА
+-- 6. КРУГЛЫЕ КНОПКИ ДЛЯ ТЕЛЕФОНА
 -- ============================================================================
 local actionButtons = {}
 local baseCircleSize = 72
@@ -534,7 +554,7 @@ local function ApplyButtonVisuals()
         item.Minus.Visible = editModeEnabled and touchButtonsEnabled
         item.Plus.Visible = editModeEnabled and touchButtonsEnabled
 
-        item.Button.TextSize = math.clamp(math.floor(13 * buttonScale), 10, 22)
+        item.Button.TextSize = math.clamp(math.floor(12 * buttonScale), 9, 20)
         item.Button.TextTransparency = math.clamp(buttonTransparency * 0.45, 0, 0.55)
 
         if editModeEnabled then
@@ -671,7 +691,7 @@ CreateRoundActionButton(
 )
 
 -- ============================================================================
--- 6. ОБРАБОТЧИКИ МЕНЮ И РЕДАКТОРА
+-- 7. ОБРАБОТЧИКИ МЕНЮ И КЛАВИШ
 -- ============================================================================
 local function RefreshMenuState()
     if touchButtonsEnabled then
@@ -781,9 +801,6 @@ closeAllBtn.MouseButton1Click:Connect(DestroyAllCompletely)
 
 RefreshMenuState()
 
--- ============================================================================
--- 7. КЛАВИШИ НА ПК (V, B, N)
--- ============================================================================
 inputConnection = UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed or isDestroyed then return end
 
@@ -797,43 +814,43 @@ inputConnection = UserInputService.InputBegan:Connect(function(input, gameProces
 end)
 
 -- ============================================================================
--- 8. ГЛАВНЫЙ ЦИКЛ: ПЕРЕТАСКИВАНИЕ, УДЕРЖАНИЕ И ПОЛЕТ РАКЕТ
+-- 8. ГЛАВНЫЙ ЦИКЛ: ПЕРЕТАСКИВАНИЕ, 2 СЛОТА + НЕБО (1000+ СТУДОВ) И ПОЛЕТ
 -- ============================================================================
 renderConnection = RunService.RenderStepped:Connect(function()
     if isDestroyed then return end
 
-    -- Обновляем перетаскивание меню и кнопок
     for _, ctrl in ipairs(dragControllers) do
         ctrl.Update()
     end
 
-    menuTitle.Text = "🚀 Ракеты • Слоты: " .. tostring(#rockets) .. "/" .. tostring(maxSlots)
-    local rootPart = getLocalRootPart()
+    local skyCount = math.max(0, #rockets - activeSideSlots)
+    menuTitle.Text = "🚀 Ракет: " .. tostring(#rockets) .. " (1000+↑: " .. tostring(skyCount) .. ")"
 
+    local rootPart = getLocalRootPart()
     if rootPart then
+        local playerBasePos = rootPart.Position
+
         for i = #rockets, 1, -1 do
             local rocket = rockets[i]
             if rocket and rocket.Parent then
-                for _, part in ipairs(rocket:GetDescendants()) do
-                    if part:IsA("BasePart") then
-                        part.CanCollide = false
-                    end
-                end
+                setRocketCollision(rocket, false)
 
-                local xOffset = (i == 1) and -4.5 or 4.5
-                local offsetPos = Vector3.new(xOffset, -0.5, -1)
-                local targetCFrame = camera.CFrame * CFrame.new(offsetPos) * CFrame.Angles(-math.rad(90), 0, 0)
-
-                if rocket:IsA("Model") then
-                    rocket:PivotTo(targetCFrame)
-                    if rocket.PrimaryPart then
-                        rocket.PrimaryPart.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                        rocket.PrimaryPart.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
-                    end
+                if i <= activeSideSlots then
+                    local xOffset = (i == 1) and -4.5 or 4.5
+                    local offsetPos = Vector3.new(xOffset, -0.5, -1)
+                    local targetCFrame = camera.CFrame * CFrame.new(offsetPos) * CFrame.Angles(-math.rad(90), 0, 0)
+                    positionRocket(rocket, targetCFrame, true)
                 else
-                    rocket.CFrame = targetCFrame
-                    rocket.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
-                    rocket.AssemblyAngularVelocity = Vector3.new(0, 0, 0)
+                    local reserveIndex = i - activeSideSlots
+                    local ringRadius = 6 + (reserveIndex % 8) * 3
+                    local angle = reserveIndex * 1.15
+                    local skyPos = playerBasePos + Vector3.new(
+                        math.cos(angle) * ringRadius,
+                        skyHeightOffset + (reserveIndex % 6) * 8,
+                        math.sin(angle) * ringRadius
+                    )
+                    local skyCFrame = CFrame.new(skyPos) * CFrame.Angles(-math.rad(90), 0, 0)
+                    positionRocket(rocket, skyCFrame, true)
                 end
             else
                 table.remove(rockets, i)
@@ -866,7 +883,7 @@ renderConnection = RunService.RenderStepped:Connect(function()
                     end
                     local lookCF = CFrame.new(currentPos, targetPos) * CFrame.Angles(-math.rad(90), 0, 0)
                     rocket:PivotTo(lookCF)
-                else
+                elseif rocket:IsA("BasePart") then
                     rocket.AssemblyLinearVelocity = direction * data.speed
                     rocket.CFrame = CFrame.new(currentPos, targetPos) * CFrame.Angles(-math.rad(90), 0, 0)
                 end
@@ -877,7 +894,7 @@ renderConnection = RunService.RenderStepped:Connect(function()
                         rocket.PrimaryPart.AssemblyLinearVelocity = forwardDir * data.speed
                     end
                     rocket:PivotTo(rocket:GetPivot() + (forwardDir * (data.speed * 0.016)))
-                else
+                elseif rocket:IsA("BasePart") then
                     rocket.AssemblyLinearVelocity = forwardDir * data.speed
                 end
             end
@@ -887,4 +904,4 @@ renderConnection = RunService.RenderStepped:Connect(function()
     end
 end)
 
-print("🚀 Перетаскивание кнопок исправлено через RenderStepped + GetMouseLocation()!")
+print("🚀 Резерв ракет на высоте 1000+ студов над игроком активирован!")
